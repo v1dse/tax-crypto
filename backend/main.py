@@ -14,6 +14,7 @@ import os
 import logging
 from dotenv import load_dotenv
 import traceback
+import re
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -34,16 +35,102 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL", "recipient@example.com")
 
 # CORS - для разработки и production
-allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,*.onrender.com,*.netlify.app")
-allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+# Поддержка wildcard паттернов для Netlify и Render
+allowed_origins_str = os.getenv(
+    "ALLOWED_ORIGINS", 
+    "http://localhost:3000,http://localhost:8000,https://tax-crypto.netlify.app,https://*.netlify.app,https://tax-crypto.onrender.com,https://*.onrender.com"
+)
+
+# Разбиваем origins на точные и wildcard паттерны
+origins_list = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+allowed_origins_exact = []
+allowed_origins_patterns = []
+
+for origin in origins_list:
+    if origin == "*" or os.getenv("CORS_ALLOW_ALL", "false").lower() == "true":
+        allowed_origins_exact = ["*"]
+        allowed_origins_patterns = []
+        break
+    elif "*" in origin:
+        # Преобразуем wildcard паттерн в regex паттерн
+        pattern = origin.replace(".", r"\.").replace("*", ".*")
+        allowed_origins_patterns.append((origin, re.compile(f"^{pattern}$")))
+    else:
+        allowed_origins_exact.append(origin)
+
+# Функция для проверки origin
+def is_origin_allowed(origin: str) -> bool:
+    """Проверяет, разрешен ли origin"""
+    if "*" in allowed_origins_exact:
+        return True
+    if origin in allowed_origins_exact:
+        return True
+    # Проверяем wildcard паттерны
+    for pattern_origin, pattern_regex in allowed_origins_patterns:
+        if pattern_regex.match(origin):
+            return True
+    return False
+
+# Собираем список точных origins для CORSMiddleware
+# Важно: при allow_credentials=True нельзя использовать "*", нужны точные домены
+known_domains = [
+    "https://tax-crypto.netlify.app",
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8000",
+]
+
+# Добавляем все точные origins из конфига
+cors_origins = list(set(allowed_origins_exact + known_domains))
+
+# Если есть wildcard паттерны, добавляем известные домены из этих паттернов
+if allowed_origins_patterns:
+    logger.info("🌐 Wildcard паттерны обнаружены, добавлены известные домены")
+    for pattern_origin, _ in allowed_origins_patterns:
+        if "netlify.app" in pattern_origin:
+            cors_origins.append("https://tax-crypto.netlify.app")
+        elif "onrender.com" in pattern_origin:
+            cors_origins.append("https://tax-crypto.onrender.com")
+
+cors_origins = list(set(cors_origins))
+
+logger.info(f"🌐 Разрешенные CORS origins: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+# Middleware для логирования CORS запросов
+@app.middleware("http")
+async def cors_logging_middleware(request: Request, call_next):
+    """Логирование CORS запросов для отладки"""
+    origin = request.headers.get("origin")
+    method = request.method
+    path = request.url.path
+    
+    if origin:
+        logger.info(f"🌐 CORS запрос: {method} {path} от origin: {origin}")
+        if origin not in cors_origins and "*" not in cors_origins:
+            logger.warning(f"⚠️ Origin {origin} не в списке разрешенных!")
+    
+    response = await call_next(request)
+    
+    # Логируем CORS headers в ответе
+    cors_headers = {
+        "access-control-allow-origin": response.headers.get("access-control-allow-origin"),
+        "access-control-allow-credentials": response.headers.get("access-control-allow-credentials"),
+        "access-control-allow-methods": response.headers.get("access-control-allow-methods"),
+    }
+    logger.debug(f"🔍 CORS headers в ответе: {cors_headers}")
+    
+    return response
 
 
 # Глобальный обработчик исключений для гарантии JSON ответов
@@ -292,6 +379,32 @@ async def submit_form(
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.options("/api/submit")
+@app.options("/submit-form")
+async def options_handler():
+    """Handler для OPTIONS preflight запросов"""
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "message": "CORS preflight successful"}
+    )
+
+
+@app.get("/cors-check")
+async def cors_check(request: Request):
+    """Endpoint для проверки CORS конфигурации"""
+    origin = request.headers.get("origin", "не указан")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "origin": origin,
+            "allowed_origins": cors_origins,
+            "origin_allowed": origin in cors_origins or "*" in cors_origins,
+            "message": "CORS проверка выполнена"
+        }
+    )
 
 
 if __name__ == "__main__":
