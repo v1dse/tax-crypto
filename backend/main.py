@@ -1,6 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pathlib import Path
 from typing import List, Optional
 import aiosmtplib
@@ -12,6 +13,7 @@ from datetime import datetime
 import os
 import logging
 from dotenv import load_dotenv
+import traceback
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -42,6 +44,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Глобальный обработчик исключений для гарантии JSON ответов
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Обработчик всех необработанных исключений - гарантирует JSON ответ.
+    HTTPException обрабатывается FastAPI автоматически, этот handler ловит остальные.
+    """
+    logger.error(f"❌ Необработанное исключение: {type(exc).__name__}: {str(exc)}", exc_info=True)
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    # Всегда возвращаем JSON ответ
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "message": "Wewnętrzny błąd serwera",
+            "detail": str(exc) if os.getenv("DEBUG", "false").lower() == "true" else "Wystąpił błąd podczas przetwarzania żądania"
+        }
+    )
 
 
 async def send_email_with_attachments(
@@ -140,7 +163,7 @@ async def send_email_with_attachments(
     
     # Отправляем письмо
     try:
-        logger.info(f"📧 Отправляем email от {email} на {RECIPIENT_EMAIL}")
+        logger.info(f"📧 Отправляем email от {email} na {RECIPIENT_EMAIL}")
         await aiosmtplib.send(
             message,
             hostname=SMTP_SERVER,
@@ -151,9 +174,20 @@ async def send_email_with_attachments(
         )
         logger.info(f"✅ Email успешно отправлен для {name}")
         return True
+    except aiosmtplib.SMTPException as e:
+        logger.error(f"❌ Ошибка SMTP при отправке email: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd SMTP podczas wysyłania wiadomości email: {str(e)}"
+        )
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки email: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+        logger.error(f"❌ Неожиданная ошибка отправки email: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Nieoczekiwany błąd podczas wysyłania wiadomości email: {str(e)}"
+        )
 
 
 @app.get("/")
@@ -186,42 +220,71 @@ async def submit_form(
     try:
         logger.info(f"📝 Получена форма от {name} ({email})")
         
+        # Валидация обязательных полей
+        if not name or not email or not type or not year:
+            logger.error("❌ Отсутствуют обязательные поля")
+            raise HTTPException(
+                status_code=400,
+                detail="Wszystkie wymagane pola muszą być wypełnione"
+            )
+        
         # Проверяем конфиг
         if not SMTP_USERNAME or not SMTP_PASSWORD:
             logger.error("❌ SMTP_USERNAME или SMTP_PASSWORD не установлены!")
-            raise HTTPException(status_code=500, detail="Email server not configured")
+            raise HTTPException(
+                status_code=500,
+                detail="Serwer email nie jest skonfigurowany"
+            )
         
         # Отправляем email
-        await send_email_with_attachments(
+        email_sent = await send_email_with_attachments(
             name=name,
             email=email,
             tax_type=type,
             year=year,
-            exchanges=exchanges,
-            dex=dex,
-            wallets=wallets,
-            operations=operations,
-            files=files
+            exchanges=exchanges or "",
+            dex=dex or "",
+            wallets=wallets or "",
+            operations=operations or "",
+            files=files or []
         )
         
-        logger.info(f"✅ Форма обработана успешно для {name}")
-        return {
-            "status": "success",
-            "message": "Форма успешно отправлена!",
-            "data": {
-                "name": name,
-                "email": email,
-                "files_count": len(files)
-            }
-        }
+        if not email_sent:
+            logger.error("❌ Email не был отправлен")
+            raise HTTPException(
+                status_code=500,
+                detail="Nie udało się wysłać wiadomości email"
+            )
         
-    except HTTPException:
-        raise
+        logger.info(f"✅ Форма обработана успешно для {name}")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message": "Formularz został pomyślnie wysłany!",
+                "data": {
+                    "name": name,
+                    "email": email,
+                    "files_count": len(files) if files else 0
+                }
+            }
+        )
+        
+    except HTTPException as e:
+        # HTTPException уже имеет правильный формат, но убедимся что это JSON
+        logger.error(f"❌ HTTPException: {e.detail}")
+        raise e
     except Exception as e:
         logger.error(f"❌ Ошибка обработки формы: {str(e)}", exc_info=True)
-        raise HTTPException(
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Используем JSONResponse для гарантии JSON формата
+        return JSONResponse(
             status_code=500,
-            detail=f"Ошибка при обработке формы: {str(e)}"
+            content={
+                "status": "error",
+                "message": "Błąd podczas przetwarzania formularza",
+                "detail": str(e)
+            }
         )
 
 
