@@ -10,10 +10,15 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 import os
+import logging
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
 load_dotenv()
+
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CryptoTax API")
 
@@ -26,8 +31,10 @@ SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL", "recipient@example.com")
 
-# CORS
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "tax-crypto.netlify.app").split(",")
+# CORS - для разработки и production
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,*.onrender.com,*.netlify.app")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -133,6 +140,7 @@ async def send_email_with_attachments(
     
     # Отправляем письмо
     try:
+        logger.info(f"📧 Отправляем email от {email} на {RECIPIENT_EMAIL}")
         await aiosmtplib.send(
             message,
             hostname=SMTP_SERVER,
@@ -141,9 +149,10 @@ async def send_email_with_attachments(
             password=SMTP_PASSWORD,
             start_tls=True,
         )
+        logger.info(f"✅ Email успешно отправлен для {name}")
         return True
     except Exception as e:
-        print(f"Error sending email: {e}")
+        logger.error(f"❌ Ошибка отправки email: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
 
 
@@ -175,6 +184,13 @@ async def submit_form(
     """
     
     try:
+        logger.info(f"📝 Получена форма от {name} ({email})")
+        
+        # Проверяем конфиг
+        if not SMTP_USERNAME or not SMTP_PASSWORD:
+            logger.error("❌ SMTP_USERNAME или SMTP_PASSWORD не установлены!")
+            raise HTTPException(status_code=500, detail="Email server not configured")
+        
         # Отправляем email
         await send_email_with_attachments(
             name=name,
@@ -188,6 +204,7 @@ async def submit_form(
             files=files
         )
         
+        logger.info(f"✅ Форма обработана успешно для {name}")
         return {
             "status": "success",
             "message": "Форма успешно отправлена!",
@@ -198,7 +215,10 @@ async def submit_form(
             }
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"❌ Ошибка обработки формы: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Ошибка при обработке формы: {str(e)}"
