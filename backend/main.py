@@ -1,5 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from typing import List, Optional
 import aiosmtplib
 from email.mime.multipart import MIMEMultipart
@@ -156,6 +158,7 @@ async def root():
 
 
 @app.post("/submit-form")
+@app.post("/api/submit")
 async def submit_form(
     name: str = Form(...),
     email: str = Form(...),
@@ -210,4 +213,10 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
+    
+    # Для продакшена: монтируем статику
+    static_dir = Path(__file__).parent.parent / "static" / "build"
+    if static_dir.exists():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
